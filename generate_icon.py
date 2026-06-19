@@ -1,137 +1,95 @@
 """
-Generate a 1024x1024 football icon (icon.png) and convert it to icon.icns
-using macOS iconutil. Run this script before py2app.
+Renders the ⚽ emoji at 1024×1024 using macOS AppKit (Apple Color Emoji font)
+and converts it to icon.icns via iconutil.
+
+AppKit is available inside the build venv because py2app depends on pyobjc.
 """
 
-import math
-import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
-try:
-    from PIL import Image, ImageDraw
-except ImportError:
-    sys.exit("Pillow not installed. Run: pip install pillow")
-
-
 SIZE = 1024
-BALL_RADIUS = 430
-CX, CY = SIZE // 2, SIZE // 2
 
 
-def draw_football(size: int = SIZE) -> Image.Image:
-    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
+def render_emoji(size: int, out_png: Path) -> None:
+    try:
+        from AppKit import (
+            NSImage, NSBitmapImageRep, NSAttributedString,
+            NSFont, NSColor, NSBezierPath, NSFontAttributeName,
+        )
+        from Foundation import NSMakeRect, NSMakeSize, NSMakePoint
+    except ImportError:
+        sys.exit(
+            "pyobjc-framework-Cocoa not found. "
+            "It is installed automatically when you run build.sh."
+        )
 
-    scale = size / SIZE
-    r = int(BALL_RADIUS * scale)
-    cx, cy = size // 2, size // 2
+    img = NSImage.alloc().initWithSize_(NSMakeSize(size, size))
+    img.lockFocus()
 
-    # White ball body
-    draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(255, 255, 255, 255))
+    # Transparent background (macOS adds the rounded-square mask automatically)
+    NSColor.clearColor().set()
+    NSBezierPath.fillRect_(NSMakeRect(0, 0, size, size))
 
-    # Shadow — subtle grey arc at bottom-right
-    shadow_r = int(r * 0.92)
-    draw.ellipse(
-        [cx - shadow_r + int(20 * scale), cy - shadow_r + int(20 * scale),
-         cx + shadow_r + int(20 * scale), cy + shadow_r + int(20 * scale)],
-        fill=(210, 210, 210, 80),
+    # Render ⚽ with Apple Color Emoji
+    font_size = size * 0.88
+    font = (
+        NSFont.fontWithName_size_("Apple Color Emoji", font_size)
+        or NSFont.systemFontOfSize_(font_size)
     )
-
-    # Black pentagon patches — classic football pattern
-    # Central pentagon at top, surrounded by 5 pentagons
-    patch_color = (30, 30, 30, 255)
-    patch_scale = r / 430.0
-
-    def pentagon(cx_p, cy_p, radius, rotation_deg=0):
-        """Return list of (x,y) for a regular pentagon."""
-        pts = []
-        for i in range(5):
-            angle = math.radians(rotation_deg + 72 * i - 90)
-            pts.append((
-                cx_p + radius * math.cos(angle),
-                cy_p + radius * math.sin(angle),
-            ))
-        return pts
-
-    pent_r = int(85 * patch_scale)   # pentagon circumradius
-    gap = int(185 * patch_scale)     # dist from ball centre to patch centre
-
-    # Centre patch (rotated so flat side faces up)
-    centre_pts = pentagon(cx, cy, pent_r, rotation_deg=0)
-    draw.polygon(centre_pts, fill=patch_color)
-
-    # 5 surrounding patches, each rotated ~36° relative to centre
-    for i in range(5):
-        angle = math.radians(72 * i - 90)
-        px = cx + gap * math.cos(angle)
-        py = cy + gap * math.sin(angle)
-        # Outer pentagons are rotated so a vertex points toward the centre
-        rot = 72 * i - 90 + 180
-        pts = pentagon(px, py, pent_r, rotation_deg=rot)
-        draw.polygon(pts, fill=patch_color)
-
-    # Seam lines connecting centre patch to each outer patch
-    seam_width = max(2, int(8 * patch_scale))
-    for i in range(5):
-        angle = math.radians(72 * i - 90)
-        # From edge of centre patch to inner edge of outer patch
-        x1 = cx + pent_r * math.cos(angle)
-        y1 = cy + pent_r * math.sin(angle)
-        x2 = cx + (gap - pent_r) * math.cos(angle)
-        y2 = cy + (gap - pent_r) * math.sin(angle)
-        draw.line([(x1, y1), (x2, y2)], fill=patch_color, width=seam_width)
-
-    # Outer circle border
-    border_w = max(3, int(12 * patch_scale))
-    draw.ellipse(
-        [cx - r, cy - r, cx + r, cy + r],
-        outline=(30, 30, 30, 255),
-        width=border_w,
+    attr_str = NSAttributedString.alloc().initWithString_attributes_(
+        "⚽", {NSFontAttributeName: font}
     )
+    text_size = attr_str.size()
+    x = (size - text_size.width) / 2.0
+    y = (size - text_size.height) / 2.0
+    attr_str.drawAtPoint_(NSMakePoint(x, y))
 
-    return img
+    img.unlockFocus()
+
+    # Export PNG (type 4 = NSBitmapImageFileTypePNG)
+    bmp = NSBitmapImageRep.imageRepWithData_(img.TIFFRepresentation())
+    png_data = bmp.representationUsingType_properties_(4, {})
+    png_data.writeToFile_atomically_(str(out_png), True)
+    print(f"  Saved {out_png}")
 
 
-def make_icns(png_path: Path, icns_path: Path):
-    """Build a .icns file from a 1024x1024 PNG using macOS iconutil."""
-    iconset = png_path.parent / "icon.iconset"
+def make_icns(png: Path, icns: Path) -> None:
+    try:
+        from PIL import Image
+    except ImportError:
+        sys.exit("Pillow not installed. Run: pip install pillow")
+
+    iconset = png.parent / "icon.iconset"
     iconset.mkdir(exist_ok=True)
+    img = Image.open(png).convert("RGBA")
 
-    img = Image.open(png_path).convert("RGBA")
-
-    sizes = [16, 32, 64, 128, 256, 512, 1024]
-    for s in sizes:
-        resized = img.resize((s, s), Image.LANCZOS)
-        resized.save(iconset / f"icon_{s}x{s}.png")
+    for s in [16, 32, 64, 128, 256, 512, 1024]:
+        img.resize((s, s), Image.LANCZOS).save(iconset / f"icon_{s}x{s}.png")
         if s <= 512:
-            resized2 = img.resize((s * 2, s * 2), Image.LANCZOS)
-            resized2.save(iconset / f"icon_{s}x{s}@2x.png")
+            img.resize((s * 2, s * 2), Image.LANCZOS).save(iconset / f"icon_{s}x{s}@2x.png")
 
     result = subprocess.run(
-        ["iconutil", "-c", "icns", str(iconset), "-o", str(icns_path)],
+        ["iconutil", "-c", "icns", str(iconset), "-o", str(icns)],
         capture_output=True,
     )
     shutil.rmtree(iconset)
-
     if result.returncode != 0:
-        print("iconutil error:", result.stderr.decode())
-        sys.exit(1)
+        sys.exit(f"iconutil error: {result.stderr.decode()}")
+    print(f"  Saved {icns}")
 
 
 if __name__ == "__main__":
     base = Path(__file__).parent
-    png_path = base / "icon.png"
-    icns_path = base / "icon.icns"
+    png = base / "icon.png"
+    icns = base / "icon.icns"
 
-    print("Drawing football icon…")
-    img = draw_football(SIZE)
-    img.save(png_path)
-    print(f"  Saved {png_path}")
+    print("Rendering ⚽ emoji with Apple Color Emoji…")
+    render_emoji(SIZE, png)
 
     print("Converting to .icns…")
-    make_icns(png_path, icns_path)
-    print(f"  Saved {icns_path}")
+    make_icns(png, icns)
+
     print("Done.")
