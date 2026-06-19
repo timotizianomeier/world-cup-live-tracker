@@ -55,8 +55,9 @@ echo "==> Generating football icon…"
 
 echo ""
 echo "==> Building WorldCupBar.app…"
-rm -rf build dist
-"$PYTHON" setup.py py2app 2>&1 | grep -v "^ADD INFO\|^copying file\|^--- Skipping\|^CTYPES USERS"
+# Use Python shutil instead of rm -rf to avoid issues with spaces in macOS platform paths
+"$PYTHON" -c "import shutil, os; [shutil.rmtree(d) for d in ('build','dist') if os.path.exists(d)]"
+"$PYTHON" setup.py py2app
 
 echo ""
 echo "✅  Built: dist/WorldCupBar.app"
