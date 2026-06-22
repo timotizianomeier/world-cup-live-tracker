@@ -75,6 +75,7 @@ ESPN_URL = "https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scor
 POLL_LIVE = 10       # seconds when a match is in progress
 POLL_IDLE = 60       # seconds when no live match
 TICKER_INTERVAL = 5  # seconds between ticker swaps
+POLL_CHECK_INTERVAL = 5  # how often the main-thread timer checks if a fetch is due
 
 
 def flag(name: str) -> str:
@@ -96,7 +97,6 @@ def parse_matches(data: dict) -> tuple[list, list, list]:
         if len(competitors) < 2:
             continue
 
-        # ESPN puts home/away in order; find by homeAway field
         home = next((c for c in competitors if c.get("homeAway") == "home"), competitors[0])
         away = next((c for c in competitors if c.get("homeAway") == "away"), competitors[1])
 
@@ -105,11 +105,10 @@ def parse_matches(data: dict) -> tuple[list, list, list]:
         home_score = home.get("score", "0")
         away_score = away.get("score", "0")
 
-        # Kickoff time
         date_str = event.get("date", "")
         try:
             kickoff_utc = dateutil.parser.parse(date_str)
-            kickoff_local = kickoff_utc.astimezone(tz=None)  # local tz
+            kickoff_local = kickoff_utc.astimezone(tz=None)
             kickoff_fmt = kickoff_local.strftime("%H:%M")
         except Exception:
             kickoff_fmt = "--:--"
@@ -156,11 +155,14 @@ class WorldCupBar(rumps.App):
         self._finished: list = []
         self._lock = threading.Lock()
         self._ticker_idx = 0
-        self._score_snapshot: dict[str, str] = {}  # event_id → "home-away"
-        self._poll_interval = POLL_IDLE
+        self._score_snapshot: dict[str, str] = {}
 
-        # Populate an initial empty menu (no None separators — they're stored
-        # outside the OrderedDict and survive clear(), leaving ghost entries)
+        # Dirty flag: set by background fetch thread, cleared by main-thread timer.
+        # Avoids touching AppKit objects from a non-main thread.
+        self._menu_dirty = False
+        self._fetching = False
+        self._next_poll_at = 0.0  # monotonic timestamp; 0 → fetch on first check
+
         self.menu = [
             rumps.MenuItem("── LIVE NOW ──"),
             rumps.MenuItem("── TODAY'S MATCHES ──"),
@@ -169,64 +171,89 @@ class WorldCupBar(rumps.App):
             rumps.MenuItem("Quit WorldCupBar", callback=rumps.quit_application),
         ]
 
-        # Kick off background threads
-        self._poll_thread = threading.Thread(target=self._poll_loop, daemon=True)
-        self._poll_thread.start()
-        self._ticker_thread = threading.Thread(target=self._ticker_loop, daemon=True)
-        self._ticker_thread.start()
+        # rumps.Timer fires on the main thread (scheduled via NSTimer in the run
+        # loop), so it is safe to call self.title and self.menu from callbacks.
+        self._ticker_timer = rumps.Timer(self._on_ticker, TICKER_INTERVAL)
+        self._ticker_timer.start()
+
+        self._poll_timer = rumps.Timer(self._on_poll_check, POLL_CHECK_INTERVAL)
+        self._poll_timer.start()
 
     # ------------------------------------------------------------------
-    # Polling
+    # Main-thread timer callbacks
     # ------------------------------------------------------------------
 
-    def _poll_loop(self):
-        while True:
-            self._fetch()
-            time.sleep(self._poll_interval)
+    def _on_ticker(self, _sender):
+        """Fires every TICKER_INTERVAL seconds on the main thread."""
+        self._update_title()
 
-    def _fetch(self):
+    def _on_poll_check(self, _sender):
+        """Fires every POLL_CHECK_INTERVAL seconds on the main thread.
+
+        Applies any pending menu rebuild and kicks off a background fetch
+        when the poll interval has elapsed.
+        """
+        if self._menu_dirty:
+            self._menu_dirty = False
+            self._rebuild_menu()
+            self._update_title()
+
+        if not self._fetching and time.monotonic() >= self._next_poll_at:
+            self._start_fetch()
+
+    # ------------------------------------------------------------------
+    # Background fetch — NO AppKit/UI calls here
+    # ------------------------------------------------------------------
+
+    def _start_fetch(self):
+        self._fetching = True
+        threading.Thread(target=self._fetch_bg, daemon=True).start()
+
+    def _fetch_bg(self):
+        """Runs on a background thread. Only modifies shared data, never UI."""
+        notifications = []
+        has_live = False
         try:
             resp = requests.get(ESPN_URL, timeout=8)
             resp.raise_for_status()
             data = resp.json()
+            live, scheduled, finished = parse_matches(data)
+            with self._lock:
+                notifications = self._collect_goal_notifications(live)
+                self._live = live
+                self._scheduled = scheduled
+                self._finished = finished
+            has_live = bool(live)
         except Exception:
-            # Network error — keep existing state, try again later
-            return
+            pass
 
-        live, scheduled, finished = parse_matches(data)
+        # Send notifications outside the lock to avoid holding it during Cocoa calls.
+        for n in notifications:
+            rumps.notification(**n)
 
-        with self._lock:
-            self._check_goals(live)
-            self._live = live
-            self._scheduled = scheduled
-            self._finished = finished
+        self._next_poll_at = time.monotonic() + (POLL_LIVE if has_live else POLL_IDLE)
+        self._menu_dirty = True
+        self._fetching = False
 
-        self._poll_interval = POLL_LIVE if live else POLL_IDLE
-        self._update_menu()
-        if not live:
-            self._update_title()  # ensure static icon when idle
-
-    def _check_goals(self, live: list):
+    def _collect_goal_notifications(self, live: list) -> list:
+        """Called with self._lock held. Returns notification kwargs dicts."""
+        result = []
         for m in live:
             eid = m["event_id"]
             new_score = f"{m['home_score']}-{m['away_score']}"
             old_score = self._score_snapshot.get(eid)
             if old_score is not None and old_score != new_score:
-                rumps.notification(
-                    title="⚽ GOAL!",
-                    subtitle=f"{m['home']} {m['home_score']} – {m['away_score']} {m['away']}",
-                    message=f"{m['detail']} — Live match update",
-                )
+                result.append({
+                    "title": "⚽ GOAL!",
+                    "subtitle": f"{m['home']} {m['home_score']} – {m['away_score']} {m['away']}",
+                    "message": f"{m['detail']} — Live match update",
+                })
             self._score_snapshot[eid] = new_score
+        return result
 
     # ------------------------------------------------------------------
-    # Ticker
+    # UI updates — must only be called from the main thread
     # ------------------------------------------------------------------
-
-    def _ticker_loop(self):
-        while True:
-            time.sleep(TICKER_INTERVAL)
-            self._update_title()
 
     def _update_title(self):
         with self._lock:
@@ -239,7 +266,6 @@ class WorldCupBar(rumps.App):
             self.title = match_title(live[idx])
             return
 
-        # Show recently finished matches (already filtered in parse if needed)
         if finished:
             idx = self._ticker_idx % len(finished)
             self._ticker_idx = (self._ticker_idx + 1) % max(len(finished), 1)
@@ -248,22 +274,14 @@ class WorldCupBar(rumps.App):
 
         self.title = "⚽"
 
-    # ------------------------------------------------------------------
-    # Menu rebuild
-    # ------------------------------------------------------------------
-
-    def _update_menu(self):
+    def _rebuild_menu(self):
         with self._lock:
             live = self._live[:]
             scheduled = self._scheduled[:]
             finished = self._finished[:]
 
-        # Clear all items — safe because we never add None separators, so
-        # every item lives in the OrderedDict and clear() removes them all
-        # from both the dict and the underlying NSMenu via __delitem__.
         self.menu.clear()
 
-        # LIVE NOW
         self.menu.add(rumps.MenuItem("── LIVE NOW ──"))
         if live:
             for m in live:
@@ -271,7 +289,6 @@ class WorldCupBar(rumps.App):
         else:
             self.menu.add(rumps.MenuItem("  No live matches right now"))
 
-        # TODAY'S MATCHES
         self.menu.add(rumps.MenuItem("── TODAY'S MATCHES ──"))
         if scheduled:
             for m in scheduled:
@@ -282,7 +299,6 @@ class WorldCupBar(rumps.App):
         else:
             self.menu.add(rumps.MenuItem("  No upcoming matches today"))
 
-        # RECENT RESULTS
         self.menu.add(rumps.MenuItem("── RECENT RESULTS ──"))
         if finished:
             for m in finished:
@@ -298,7 +314,8 @@ class WorldCupBar(rumps.App):
     # ------------------------------------------------------------------
 
     def _refresh_now(self, _):
-        threading.Thread(target=self._fetch, daemon=True).start()
+        if not self._fetching:
+            self._start_fetch()
 
 
 if __name__ == "__main__":
