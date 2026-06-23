@@ -182,7 +182,7 @@ def main():
     prev_scores = load_state()
 
     try:
-        resp = requests.get(ESPN_URL, timeout=8)
+        resp = requests.get(ESPN_URL, timeout=8, headers={"User-Agent": "Mozilla/5.0"})
         resp.raise_for_status()
         live, scheduled, finished = parse_matches(resp.json())
     except Exception as e:
