@@ -236,6 +236,7 @@ def main():
         print("---")
 
     print("Refresh | refresh=true")
+    print("Quit WorldCupBar | bash=/usr/bin/pkill param1=-x param2=SwiftBar terminal=false")
 
 
 if __name__ == "__main__":
