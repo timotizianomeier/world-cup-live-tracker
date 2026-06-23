@@ -6,9 +6,15 @@
 # SwiftBar plugin — place in ~/Library/Application Support/SwiftBar/Plugins/
 # Filename controls refresh interval: worldcup.30s.py = every 30 seconds.
 
+import json
+import subprocess
 import sys
+from pathlib import Path
+
 import requests
 import dateutil.parser
+
+STATE_FILE = Path.home() / ".worldcupbar_state.json"
 
 FLAGS = {
     # --- Hosts ---
@@ -106,6 +112,7 @@ def parse_matches(data: dict) -> tuple[list, list, list]:
             kickoff_fmt = "--:--"
 
         match = {
+            "id": event.get("id", ""),
             "home": home_name,
             "away": away_name,
             "home_score": home.get("score", "0"),
@@ -138,7 +145,42 @@ def menu_line(m: dict, suffix: str = "") -> str:
     )
 
 
+def load_state() -> dict:
+    try:
+        return json.loads(STATE_FILE.read_text())
+    except Exception:
+        return {}
+
+
+def save_state(scores: dict) -> None:
+    try:
+        STATE_FILE.write_text(json.dumps(scores))
+    except Exception:
+        pass
+
+
+def notify(title: str, subtitle: str) -> None:
+    script = f'display notification "{subtitle}" with title "{title}"'
+    subprocess.run(["osascript", "-e", script], capture_output=True)
+
+
+def check_and_notify(live: list, prev: dict) -> dict:
+    current = {}
+    for m in live:
+        eid = m["id"]
+        score = f"{m['home_score']}-{m['away_score']}"
+        current[eid] = score
+        if eid in prev and prev[eid] != score:
+            notify(
+                "⚽ GOAL!",
+                f"{flag(m['home'])} {m['home']} {m['home_score']} – {m['away_score']} {m['away']} {flag(m['away'])}",
+            )
+    return current
+
+
 def main():
+    prev_scores = load_state()
+
     try:
         resp = requests.get(ESPN_URL, timeout=8)
         resp.raise_for_status()
@@ -149,6 +191,9 @@ def main():
         print(f"Error fetching scores: {e}")
         print("Retry | refresh=true")
         sys.exit(0)
+
+    current_scores = check_and_notify(live, prev_scores)
+    save_state(current_scores)
 
     # --- Menu bar title (lines separated by ~~~ alternate in the bar) ---
     if live:
