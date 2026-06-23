@@ -3,8 +3,13 @@
 # dependencies = ["requests", "python-dateutil"]
 # ///
 
-# SwiftBar plugin — place in ~/Library/Application Support/SwiftBar/Plugins/
-# Filename controls refresh interval: worldcup.30s.py = every 30 seconds.
+# <swiftbar.title>WorldCupBar</swiftbar.title>
+# <swiftbar.version>2.0</swiftbar.version>
+# <swiftbar.author>Timo Meier</swiftbar.author>
+# <swiftbar.author.github>timotizianomeier</swiftbar.author.github>
+# <swiftbar.desc>Live FIFA World Cup 2026 scores in your menu bar.</swiftbar.desc>
+# <swiftbar.dependencies>uv</swiftbar.dependencies>
+# <swiftbar.aboutURL>https://github.com/timotizianomeier/world-cup-live-tracker</swiftbar.aboutURL>
 
 import json
 import subprocess
